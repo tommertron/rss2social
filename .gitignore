@@ -1,0 +1,32 @@
+# Ignore configuration and posted URLs
+config.json
+posted_urls.json
+
+# Ignore Python virtual environment
+myenv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore common macOS files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Ignore system-specific files
+Thumbs.db
+Desktop.ini
+
+# Ignore logs and temp files
+*.log
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Ignore compiled files
+*.so
+*.dll
+*.dylib
+
