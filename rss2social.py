@@ -1,106 +1,122 @@
-#!/Users/tommertron/coding/rss2social/myenv/bin/python
-
-import json
+import argparse
 import feedparser
-import requests
-from mastodon import Mastodon
-from atproto import Client  # For Bluesky
-
-# Load configuration from a JSON file
-def load_config(config_path):
-    with open(config_path, "r") as file:
-        return json.load(file)
-
-# Fetch latest RSS feed entries
-def fetch_rss_entries(feed_url):
-    feed = feedparser.parse(feed_url)
-    return feed.entries[:5]  # Limit to latest 5 entries
-
-# Post to Mastodon
-def post_to_mastodon(config, message):
-    for account in config["mastodon"]:
-        try:
-            mastodon = Mastodon(
-                access_token=account["access_token"],
-                api_base_url=account["api_base_url"]
-            )
-            mastodon.status_post(message)
-            print(f"Posted to Mastodon ({account['api_base_url']})")
-        except Exception as e:
-            print(f"Error posting to {account['api_base_url']}: {e}")
-
-# Post to Bluesky
-def post_to_bluesky(config, message):
-    if "bluesky" not in config or not config["bluesky"].get("username") or not config["bluesky"].get("password"):
-        print("Bluesky not configured. Skipping...")
-        return
-    
-    try:
-        client = Client()
-        client.login(config["bluesky"]["username"], config["bluesky"]["password"])
-        client.send_post(message)
-        print("Posted to Bluesky")
-    except Exception as e:
-        print(f"Error posting to Bluesky: {e}")
-
-# Post to other platforms (expand as needed)
-def post_to_other_platforms(config, message):
-    if "webhook" not in config or not config["webhook"]:
-        print("No webhook configured. Skipping...")
-        return
-
-    try:
-        requests.post(config["webhook"], json={"text": message})
-        print("Posted to webhook endpoint")
-    except Exception as e:
-        print(f"Error posting to webhook: {e}")
-
-# Handle Posted URLs file 
 import json
 import os
+import re
+import post_to_bluesky
+import post_to_mastodon
+from html import unescape
 
+CONFIG_FILE = "config.json"
 POSTED_URLS_FILE = "posted_urls.json"
 
+def load_config():
+    """Load configuration from config.json."""
+    with open(CONFIG_FILE, "r") as file:
+        return json.load(file)
+
 def load_posted_urls():
-    """Load previously posted URLs, handling empty or missing files."""
+    """Load previously posted URLs from posted_urls.json."""
     if not os.path.exists(POSTED_URLS_FILE):
-        return []  # Return an empty list if the file doesn't exist
-    
+        return set()
+
     try:
         with open(POSTED_URLS_FILE, "r") as file:
-            data = file.read().strip()
-            return json.loads(data) if data else []  # Return an empty list if file is blank
+            return set(json.load(file))
     except json.JSONDecodeError:
-        print("Warning: posted_urls.json is corrupted. Resetting it.")
-        return []
+        print("⚠️ Warning: posted_urls.json is corrupted. Resetting it.")
+        return set()
 
-def save_posted_urls(urls):
-    """Save posted URLs to file."""
+def save_posted_urls(posted_urls):
+    """Save posted URLs to posted_urls.json."""
     with open(POSTED_URLS_FILE, "w") as file:
-        json.dump(urls, file, indent=4)
-        
-        
-# Main function
+        json.dump(list(posted_urls), file, indent=4)
+
+def fetch_rss(feed_url, limit):
+    """Fetch latest RSS feed entries, limited by the `limit` argument."""
+    feed = feedparser.parse(feed_url)
+    return feed.entries[:limit]  # Limit number of entries if specified
+
+def extract_featured_image(entry):
+    """Attempt to extract the featured image from the RSS entry."""
+    if "media_content" in entry:  # Some feeds use media:content
+        return entry["media_content"][0]["url"]
+    if "links" in entry:
+        for link in entry["links"]:
+            if link["rel"] == "enclosure" and "image" in link["type"]:
+                return link["href"]
+    if "summary" in entry and "<img" in entry["summary"]:  # Extract from summary
+        match = re.search(r'<img.*?src=["\'](.*?)["\']', entry["summary"])
+        if match:
+            return match.group(1)
+    return None  # No image found
+
+## Clean RSS HTML Description For Posting
+
+import re
+from html import unescape
+
+def strip_html(html):
+    """Remove headers completely, strip all HTML tags, normalize spaces, and decode entities."""
+    html = re.sub(r"<h\d[^>]*>.*?</h\d>", "", html, flags=re.DOTALL)  # Remove entire header blocks
+    html = re.sub(r"<[^>]+>", "", html)  # Remove all remaining HTML tags
+    html = re.sub(r"\s+", " ", html).strip()  # Normalize whitespace
+    return unescape(html)  # Decode HTML entities
+
+def clean_summary(summary, length=40):
+    """Clean summary text, remove headers completely, and truncate."""
+    clean_text = strip_html(summary)
+    clean_text = clean_text.replace("#", "").strip()  # Remove standalone "#" symbols
+    return (clean_text[:length] + "...") if len(clean_text) > length else clean_text
+
 def main():
-    config = load_config("config.json")
-    feed_entries = fetch_rss_entries(config["rss_feed"]) 
+    """Fetch RSS and post each item to configured platforms."""
 
-    posted_urls = load_posted_urls()  # Load previously posted URLs
+    # 🔹 Parse CLI Arguments
+    parser = argparse.ArgumentParser(description="Post RSS feed entries to Bluesky and Mastodon.")
+    parser.add_argument("--limit", type=int, default=5, help="Number of RSS feed entries to process (default: 5).")
+    parser.add_argument("--no-mastodon", action="store_true", help="Disable posting to Mastodon (for debugging).")
+    args = parser.parse_args()
 
-    for entry in feed_entries:
-        if entry.link in posted_urls:
-            print(f"Skipping already posted: {entry.link}")
-            continue  # Skip if already posted
+    config = load_config()
+    posted_urls = load_posted_urls()
 
-        message = f"{entry.title} - {entry.link}"
-        post_to_mastodon(config, message)
-        post_to_bluesky(config, message)
-        post_to_other_platforms(config, message)
+    feed_url = config["rss_feed"]
+    bluesky_accounts = config.get("bluesky", [])  # List of Bluesky accounts
+    mastodon_accounts = config.get("mastodon", [])  # List of Mastodon accounts
 
-        # Save the new post's URL
-        posted_urls.append(entry.link)
+    entries = fetch_rss(feed_url, args.limit)
+
+    for entry in entries:
+        title = entry.title
+        link = entry.link
+        summary = clean_summary(entry.summary) if hasattr(entry, "summary") else "New post from RSS feed"
+        image_url = extract_featured_image(entry)
+
+        if link in posted_urls:
+            print(f"⏭ Skipping already posted: {link}")
+            continue  # Skip this entry
+
+        print(f"📢 Posting: {title}")
+
+        # Post to all configured Bluesky accounts
+        for account in bluesky_accounts:
+            try:
+                post_to_bluesky.post_to_bluesky(account["username"], account["password"], title, link, summary, image_url)
+            except Exception as e:
+                print(f"❌ Error posting to Bluesky ({account['username']}): {e}")
+
+        # Post to all configured Mastodon accounts (if not disabled via CLI)
+        if not args.no_mastodon:
+            for account in mastodon_accounts:
+                try:
+                    post_to_mastodon.post_to_mastodon(account["api_base_url"], account["access_token"], f"{title}\n{link}")
+                except Exception as e:
+                    print(f"❌ Error posting to Mastodon ({account['api_base_url']}): {e}")
+
+        # ✅ Add to posted URLs only if at least one post succeeded
+        posted_urls.add(link)
         save_posted_urls(posted_urls)
-
 
 if __name__ == "__main__":
     main()
