@@ -1,6 +1,9 @@
-# Ignore configuration and posted URLs
+# Ignore configuration and posted URLs and log
 config.json
 posted_urls.json
+(test verstion) config.json
+(prod version) config.json
+rss2social.log
 
 # Ignore Python virtual environment
 myenv/
@@ -29,5 +32,3 @@ Desktop.ini
 *.so
 *.dll
 *.dylib
-
-rss2social.log
